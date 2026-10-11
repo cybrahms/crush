@@ -87,7 +87,7 @@ func TestDrainQueueForStep_FiltersUnderDispatchLock(t *testing.T) {
 	// Cancel high-water mark at seq 2: seq <= 2 and seq == 0 are covered.
 	a.cancelMark.Set(sessionID, 2)
 
-	fold, canceledWithRunID := a.drainQueueForStep(sessionID)
+	fold, canceledWithRunID := a.drainQueueForStep(sessionID, "")
 
 	require.Len(t, fold, 1,
 		"only the follow-up queued after the cancel (seq > mark) must be folded")
@@ -117,7 +117,7 @@ func TestDrainQueueForStep_NoMarkFoldsAllNonRunID(t *testing.T) {
 		{SessionID: sessionID, Prompt: "b", acceptSeq: 5},
 	})
 
-	fold, canceledWithRunID := a.drainQueueForStep(sessionID)
+	fold, canceledWithRunID := a.drainQueueForStep(sessionID, "")
 	require.Len(t, fold, 2, "no cancel mark means all non-RunID queued calls are folded")
 	require.Empty(t, canceledWithRunID)
 }
@@ -146,7 +146,7 @@ func TestDrainQueueForStep_KeepsRunIDPromptsQueued(t *testing.T) {
 		{SessionID: sessionID, RunID: "run-b", Prompt: "keep-me-too", acceptSeq: 3},
 	})
 
-	fold, canceledWithRunID := a.drainQueueForStep(sessionID)
+	fold, canceledWithRunID := a.drainQueueForStep(sessionID, "")
 
 	require.Len(t, fold, 1, "only the non-RunID prompt is folded into the active turn")
 	require.Equal(t, "fold-me", fold[0].Prompt)
@@ -182,7 +182,7 @@ func TestDrainQueueForStep_ReportsCanceledRunIDDrops(t *testing.T) {
 	})
 	a.cancelMark.Set(sessionID, 2)
 
-	fold, canceledWithRunID := a.drainQueueForStep(sessionID)
+	fold, canceledWithRunID := a.drainQueueForStep(sessionID, "")
 
 	require.Empty(t, fold, "no uncanceled non-RunID prompts to fold")
 	require.Len(t, canceledWithRunID, 1,
@@ -321,9 +321,39 @@ func TestDrainQueueForStep_DroppedRunIDPublishesCancelledRunComplete(t *testing.
 	})
 	a.cancelMark.Set(sessionID, 2)
 
-	_, canceledWithRunID := a.drainQueueForStep(sessionID)
+	_, canceledWithRunID := a.drainQueueForStep(sessionID, "")
 	require.Len(t, canceledWithRunID, 1)
 	a.publishCanceledQueueDrops(canceledWithRunID)
 
 	requireSingleCancelledRunComplete(t, ch, sessionID, "run-dropped")
+}
+
+func TestDrainQueueForStepKeepsDifferentChannelOrigins(t *testing.T) {
+	t.Parallel()
+	env := testEnv(t)
+	a := NewSessionAgent(SessionAgentOptions{Sessions: env.sessions, Messages: env.messages}).(*sessionAgent)
+	env.joinTitles(a)
+	const sessionID = "channel-queue-session"
+	a.messageQueue.Set(sessionID, []SessionAgentCall{
+		{SessionID: sessionID, Prompt: "same origin", Channel: "switchboard"},
+		{SessionID: sessionID, Prompt: "telemetry probe", Channel: "switchboard-telemetry"},
+		{SessionID: sessionID, Prompt: "local steer", Channel: ""},
+	})
+	fold, canceled := a.drainQueueForStep(sessionID, "switchboard")
+	require.Len(t, fold, 1)
+	require.Equal(t, "same origin", fold[0].Prompt)
+	require.Empty(t, canceled)
+	kept, ok := a.messageQueue.Get(sessionID)
+	require.True(t, ok)
+	require.Len(t, kept, 2)
+	require.Equal(t, "switchboard-telemetry", kept[0].Channel)
+	require.Equal(t, "", kept[1].Channel)
+	fold, canceled = a.drainQueueForStep(sessionID, "switchboard-telemetry")
+	require.Len(t, fold, 1)
+	require.Equal(t, "telemetry probe", fold[0].Prompt)
+	require.Empty(t, canceled)
+	kept, ok = a.messageQueue.Get(sessionID)
+	require.True(t, ok)
+	require.Len(t, kept, 1)
+	require.Equal(t, "local steer", kept[0].Prompt)
 }

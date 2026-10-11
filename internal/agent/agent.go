@@ -576,13 +576,15 @@ func (a *sessionAgent) EnqueueWhenBusy(call SessionAgentCall) bool {
 // publish their terminal cancelled RunComplete (a caller waiting on that
 // RunID, e.g. `crush run`, would otherwise hang). Uncanceled calls without
 // a RunID are returned in fold to be folded into the active turn,
-// preserving the existing follow-up behavior. Uncanceled calls that carry
+// preserving same-origin follow-up behavior. Calls from a different channel
+// remain queued for their own turn, whose tools are scoped to that origin.
+// Uncanceled calls that carry
 // a RunID are left in the queue so each runs as its own turn via the
 // recursive run path and publishes its own RunComplete, giving every
 // RunID-bearing prompt an explicit lifecycle instead of being silently
 // absorbed into another turn. fold is processed by the caller without the
 // lock held.
-func (a *sessionAgent) drainQueueForStep(sessionID string) (fold, canceledWithRunID []SessionAgentCall) {
+func (a *sessionAgent) drainQueueForStep(sessionID, channel string) (fold, canceledWithRunID []SessionAgentCall) {
 	dispatchLock := a.sessionMu(sessionID)
 	dispatchLock.Lock()
 	defer dispatchLock.Unlock()
@@ -605,7 +607,7 @@ func (a *sessionAgent) drainQueueForStep(sessionID string) (fold, canceledWithRu
 			}
 			continue
 		}
-		if queued.RunID != "" {
+		if queued.RunID != "" || queued.Channel != channel {
 			keep = append(keep, queued)
 			continue
 		}
@@ -1087,7 +1089,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			// into this turn; uncanceled prompts with a RunID are left
 			// queued so each runs as its own turn (with its own
 			// RunComplete) via the recursive run path below.
-			fold, canceledRunIDs := a.drainQueueForStep(call.SessionID)
+			fold, canceledRunIDs := a.drainQueueForStep(call.SessionID, call.Channel)
 			a.publishCanceledQueueDrops(canceledRunIDs)
 			for _, queued := range fold {
 				userMessage, createErr := a.createUserMessage(callContext, queued)
